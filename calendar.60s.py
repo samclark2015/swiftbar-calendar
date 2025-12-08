@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.13"
 # dependencies = [
@@ -9,11 +10,11 @@
 # ///
 # <xbar.title>Google Calendar Events</xbar.title>
 # <xbar.version>v2.0</xbar.version>
-# <xbar.author>Your Name</xbar.author>
-# <xbar.author.github>your-github-username</xbar.author.github>
+# <xbar.author>Sam Clark</xbar.author>
+# <xbar.author.github>samclark2015</xbar.author.github>
 # <xbar.desc>Displays today and tomorrow's Google Calendar events with meeting links</xbar.desc>
-# <xbar.dependencies>python3,uv</xbar.dependencies>
-# <xbar.abouturl>https://github.com/your-repo</xbar.abouturl>
+# <xbar.dependencies>uv</xbar.dependencies>
+# <xbar.abouturl>https://github.com/samclark2015/swiftbar-calendar</xbar.abouturl>
 
 import datetime
 import os
@@ -25,14 +26,14 @@ import sys
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from swiftbarmenu import MenuItem, MenuSeparator, SwiftBarMenu
+from swiftbarmenu.menu import Menu
 
 # If modifying these SCOPES, delete the file token.pickle.
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 
 # Get the directory where this script is located
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+DATA_DIR = os.path.join(SCRIPT_DIR, ".data")
 TOKEN_PATH = os.path.join(DATA_DIR, "token.pickle")
 CREDENTIALS_PATH = os.path.join(DATA_DIR, "credentials.json")
 
@@ -62,15 +63,10 @@ def get_credentials():
 def login():
     """Run the OAuth login flow."""
     if not os.path.exists(CREDENTIALS_PATH):
-        menu = SwiftBarMenu(
-            [
-                MenuItem("🔑 Error"),
-                MenuSeparator(),
-                MenuItem("credentials.json not found"),
-                MenuItem("Place credentials.json in calendar/helpers/"),
-            ]
-        )
-        menu.render()
+        menu = Menu("🔑 Error")
+        menu.add_item("credentials.json not found")
+        menu.add_item("Place credentials.json in calendar/.data/")
+        menu.dump()
         sys.exit(1)
 
     try:
@@ -96,6 +92,13 @@ def parse_datetime(dt_string):
         return datetime.datetime.fromisoformat(dt_string + "T00:00:00")
 
 
+def pluralize(count, singular, plural=None):
+    """Return singular or plural form based on count."""
+    if plural is None:
+        plural = singular + "s"
+    return singular if count == 1 else plural
+
+
 def format_time(dt):
     """Format datetime for display."""
     return dt.strftime("%-I:%M %p")
@@ -114,9 +117,9 @@ def get_time_until(start_dt, now):
     minutes = (total_seconds % 3600) // 60
 
     if hours > 0:
-        return f"In {hours}h"
+        return f"In {hours} {pluralize(hours, 'hour')}"
     elif minutes > 0:
-        return f"In {minutes}m"
+        return f"In {minutes} {pluralize(minutes, 'minute')}"
     else:
         return "Now"
 
@@ -182,8 +185,8 @@ def get_attendee_count(event):
     return len(attendees)
 
 
-def create_event_item(event, now):
-    """Create a menu item for a calendar event."""
+def add_event_to_menu(menu, event, now):
+    """Add a calendar event to the menu."""
     start_str = event["start"].get("dateTime", event["start"].get("date"))
     end_str = event["end"].get("dateTime", event["end"].get("date"))
 
@@ -213,16 +216,15 @@ def create_event_item(event, now):
     time_range = f"{format_time(start_local)} - {format_time(end_local)}"
     attendees_text = ""
     if attendee_count > 0:
-        attendee_word = "attendee" if attendee_count == 1 else "attendees"
-        attendees_text = f" • {attendee_count} {attendee_word}"
+        attendees_text = f" • {attendee_count} {pluralize(attendee_count, 'attendee')}"
 
     event_line = f"{status_emoji}{time_range} ({duration}) • {summary}{attendees_text}"
 
-    # Create menu item with link if available
+    # Add menu item with link if available
     if conference_link:
-        return MenuItem(event_line, href=conference_link)
+        menu.add_item(event_line, href=conference_link)
     else:
-        return MenuItem(event_line)
+        menu.add_item(event_line)
 
 
 def main() -> None:
@@ -237,20 +239,11 @@ def main() -> None:
 
     if not creds:
         # Not logged in or token expired
-        menu = SwiftBarMenu(
-            [
-                MenuItem("🔑❌"),
-                MenuSeparator(),
-                MenuItem(
-                    "Login to Google Calendar",
-                    bash=sys.argv[0],
-                    params=["login"],
-                    terminal=True,
-                    refresh=True,
-                ),
-            ]
+        menu = Menu("🔑❌")
+        menu.add_action(
+            "Login to Google Calendar", ["login"], terminal=True, refresh=True
         )
-        menu.render()
+        menu.dump()
         return
 
     try:
@@ -315,10 +308,7 @@ def main() -> None:
             elif event_date == tomorrow_date:
                 tomorrow_events.append(event)
 
-        # Build menu items
-        menu_items = []
-
-        # Display menu bar with next meeting info
+        # Build menu with header
         if remaining_today > 0:
             # Find next meeting
             next_meeting = None
@@ -347,64 +337,46 @@ def main() -> None:
                     start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
 
                 countdown = get_time_until(start_dt, now)
-                menu_items.append(MenuItem(f"📅 {countdown} - {remaining_today} more"))
+                # Subtract 1 from remaining_today to exclude the next/current meeting from "more" count
+                more_count = remaining_today - 1
+                if more_count > 0:
+                    menu = Menu(f"📅 {countdown} - {more_count} more")
+                else:
+                    menu = Menu(f"📅 {countdown}")
             else:
-                menu_items.append(MenuItem(f"📅 {remaining_today}"))
+                menu = Menu(f"📅 {remaining_today}")
         else:
-            menu_items.append(MenuItem("😴 No more meetings"))
-
-        menu_items.append(MenuSeparator())
+            menu = Menu("😴 No more meetings")
 
         # Display today's events
-        menu_items.append(MenuItem("Today"))
+        menu.add_item("Today")
         if today_events:
             for event in today_events:
-                menu_items.append(create_event_item(event, now))
+                add_event_to_menu(menu, event, now)
         else:
-            menu_items.append(MenuItem("No events today"))
+            menu.add_item("No events today")
 
-        menu_items.append(MenuSeparator())
+        menu.add_sep()
 
         # Display tomorrow's events
-        menu_items.append(MenuItem("Tomorrow"))
+        menu.add_item("Tomorrow")
         if tomorrow_events:
             for event in tomorrow_events:
-                menu_items.append(create_event_item(event, now))
+                add_event_to_menu(menu, event, now)
         else:
-            menu_items.append(MenuItem("No events tomorrow"))
+            menu.add_item("No events tomorrow")
 
         # Add refresh option
-        menu_items.append(MenuSeparator())
-        menu_items.append(MenuItem("Refresh", refresh=True))
+        menu.add_action_refresh()
 
         # Render the menu
-        menu = SwiftBarMenu(menu_items)
-        menu.render()
+        menu.dump()
 
     except Exception as e:
-        menu = SwiftBarMenu(
-            [
-                MenuItem("📅 ⚠️"),
-                MenuSeparator(),
-                MenuItem(f"Error: {str(e)}"),
-                MenuItem(
-                    "Re-login",
-                    bash=sys.argv[0],
-                    params=["login"],
-                    terminal=True,
-                    refresh=True,
-                ),
-            ]
-        )
-        menu.render()
-
-
-if __name__ == "__main__":
-    main()
-
-
-def main() -> None:
-    print("Hello from calendar.60s.py!")
+        menu = Menu("📅 ⚠️")
+        menu.add_item(f"Error: {str(e)}")
+        menu.add_action("Re-login", ["login"], terminal=True, refresh=True)
+        menu.dump()
 
 
 if __name__ == "__main__":
