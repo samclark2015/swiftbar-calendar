@@ -27,6 +27,7 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from swiftbarmenu.menu import Menu
+from swiftbarmenu.notification import Notification
 
 # If modifying these SCOPES, delete the file token.pickle.
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
@@ -36,6 +37,33 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, ".data")
 TOKEN_PATH = os.path.join(DATA_DIR, "token.pickle")
 CREDENTIALS_PATH = os.path.join(DATA_DIR, "credentials.json")
+NOTIFIED_PATH = os.path.join(DATA_DIR, "notified.pickle")
+
+
+def get_notified_events():
+    """Get set of event IDs that have been notified."""
+    if os.path.exists(NOTIFIED_PATH):
+        with open(NOTIFIED_PATH, "rb") as f:
+            return pickle.load(f)
+    return set()
+
+
+def mark_event_notified(event_id):
+    """Mark an event as notified."""
+    notified = get_notified_events()
+    notified.add(event_id)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(NOTIFIED_PATH, "wb") as f:
+        pickle.dump(notified, f)
+
+
+def clean_old_notifications(current_event_ids):
+    """Remove notification records for events that are no longer upcoming."""
+    notified = get_notified_events()
+    notified = notified.intersection(current_event_ids)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(NOTIFIED_PATH, "wb") as f:
+        pickle.dump(notified, f)
 
 
 def get_credentials():
@@ -117,9 +145,9 @@ def get_time_until(start_dt, now):
     minutes = (total_seconds % 3600) // 60
 
     if hours > 0:
-        return f"In {hours} {pluralize(hours, 'hour')}"
+        return f"In {hours}h"
     elif minutes > 0:
-        return f"In {minutes} {pluralize(minutes, 'minute')}"
+        return f"In {minutes}m"
     else:
         return "Now"
 
@@ -281,8 +309,11 @@ def main() -> None:
         today_events = []
         tomorrow_events = []
         remaining_today = 0
+        notified_events = get_notified_events()
+        current_event_ids = set()
 
         for event in events:
+            current_event_ids.add(event["id"])
             start_str = event["start"].get("dateTime", event["start"].get("date"))
             end_str = event["end"].get("dateTime", event["end"].get("date"))
 
@@ -308,9 +339,40 @@ def main() -> None:
             elif event_date == tomorrow_date:
                 tomorrow_events.append(event)
 
+        # Clean old notification records
+        clean_old_notifications(current_event_ids)
+
+        # Check for upcoming meetings to notify about (5 minutes before)
+        for event in today_events:
+            event_id = event["id"]
+            if event_id in notified_events:
+                continue
+
+            start_str = event["start"].get("dateTime", event["start"].get("date"))
+            start_dt = parse_datetime(start_str)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
+
+            # Check if meeting starts in 4-6 minutes (to account for refresh interval)
+            time_until = (start_dt - now).total_seconds()
+            if 240 <= time_until <= 360:  # 4-6 minutes
+                attendee_count = get_attendee_count(event)
+                if attendee_count > 0:  # Only notify for meetings with attendees
+                    summary = event.get("summary", "Untitled Event")
+                    conference_link = get_conference_link(event)
+
+                    notification = Notification(
+                        title="Meeting Starting Soon",
+                        subtitle=summary,
+                        body=f"Starting in 5 minutes with {attendee_count} {pluralize(attendee_count, 'attendee')}",
+                        href=conference_link,
+                    )
+                    notification.show()
+                    mark_event_notified(event_id)
+
         # Build menu with header
         if remaining_today > 0:
-            # Find next meeting
+            # Find next meeting with attendees
             next_meeting = None
             for event in today_events:
                 start_str = event["start"].get("dateTime", event["start"].get("date"))
@@ -323,7 +385,8 @@ def main() -> None:
                 if end_dt.tzinfo is None:
                     end_dt = end_dt.replace(tzinfo=datetime.timezone.utc)
 
-                if end_dt > now:
+                # Only consider meetings with attendees that haven't ended
+                if end_dt > now and get_attendee_count(event) > 0:
                     next_meeting = event
                     break
 
@@ -340,21 +403,34 @@ def main() -> None:
                 # Subtract 1 from remaining_today to exclude the next/current meeting from "more" count
                 more_count = remaining_today - 1
                 if more_count > 0:
-                    menu = Menu(f"📅 {countdown} - {more_count} more")
+                    menu = Menu(f"📅 {countdown} • {more_count} more")
                 else:
-                    menu = Menu(f"📅 {countdown}")
+                    menu = Menu(f"📅 {countdown} • No more")
             else:
                 menu = Menu(f"📅 {remaining_today}")
         else:
             menu = Menu("😴 No more meetings")
 
-        # Display today's events
+        # Display today's events (only upcoming or in progress)
         menu.add_item("Today")
-        if today_events:
-            for event in today_events:
+        upcoming_today = [
+            e
+            for e in today_events
+            if parse_datetime(e["end"].get("dateTime", e["end"].get("date"))).replace(
+                tzinfo=datetime.timezone.utc
+                if parse_datetime(e["end"].get("dateTime", e["end"].get("date"))).tzinfo
+                is None
+                else parse_datetime(
+                    e["end"].get("dateTime", e["end"].get("date"))
+                ).tzinfo
+            )
+            > now
+        ]
+        if upcoming_today:
+            for event in upcoming_today:
                 add_event_to_menu(menu, event, now)
         else:
-            menu.add_item("No events today")
+            menu.add_item("No upcoming events today")
 
         menu.add_sep()
 
